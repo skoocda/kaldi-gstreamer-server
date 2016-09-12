@@ -34,7 +34,6 @@ class DecoderPipeline2(object):
         self.error_handler = None
         self.request_id = "<undefined>"
 
-
     def create_pipeline(self, conf):
 
         self.appsrc = Gst.ElementFactory.make("appsrc", "appsrc")
@@ -106,7 +105,6 @@ class DecoderPipeline2(object):
         pad.link(self.audioconvert.get_static_pad("sink"))
         logger.info("%s: Connected audio decoder" % self.request_id)
 
-
     def _on_partial_result(self, asr, hyp):
         logger.info("%s: Got partial result: %s" % (self.request_id, hyp.decode('utf8')))
         if self.result_handler:
@@ -156,7 +154,6 @@ class DecoderPipeline2(object):
         self.pipeline.set_state(Gst.State.NULL)
         self.request_id = "<undefined>"
 
-
     def init_request(self, id, caps_str):
         self.request_id = id
         logger.info("%s: Initializing request" % (self.request_id))
@@ -177,7 +174,7 @@ class DecoderPipeline2(object):
             self.filesink.set_property('location', "%s/%s.raw" % (self.outdir, id))
             self.filesink.set_state(Gst.State.PLAYING)
 
-        #self.filesink.set_state(Gst.State.PLAYING)        
+        #self.filesink.set_state(Gst.State.PLAYING)
         #self.decodebin.set_state(Gst.State.PLAYING)
         self.pipeline.set_state(Gst.State.PLAYING)
         self.filesink.set_state(Gst.State.PLAYING)
@@ -195,7 +192,6 @@ class DecoderPipeline2(object):
         self.appsrc.emit("push-buffer", buf)
         logger.debug('%s: Pushing buffer done' % self.request_id)
 
-
     def end_request(self):
         logger.info("%s: Pushing EOS to pipeline" % self.request_id)
         self.appsrc.emit("end-of-stream")
@@ -211,7 +207,6 @@ class DecoderPipeline2(object):
 
     def set_error_handler(self, handler):
         self.error_handler = handler
-
 
     def cancel(self):
         logger.info("%s: Sending EOS to pipeline in order to cancel processing" % self.request_id)
