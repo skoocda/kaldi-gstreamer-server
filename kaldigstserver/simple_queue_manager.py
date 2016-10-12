@@ -2,11 +2,13 @@ __author__ = 'skoocda'
 
 import os
 import sys
+import time
 import thread
 import json
 import boto3
 import botocore
 import pymongo
+from sys import stdout
 from pymongo import MongoClient
 from sqs_client import SQSClient
 from ws4py.manager import WebSocketManager
@@ -157,18 +159,24 @@ def get_job(queue, bucket):
         #print(message.body)
         #print(message.message_attributes)
         if message.message_attributes is not None:
-            filename = message.message_attributes.get('file').get('StringValue')
-            if filename:
-                print('[UPDATE] Downloading {0} to /tmp'.format(filename))
-                bucket.download_file(filename, './tmp/'+filename)
-                # Let the queue know that the message is processed
-                print('[UPDATE] Deleted message: {0}'.format(message.body))
-                message.delete()
-                return filename
+            filepath = message.message_attributes.get('file').get('StringValue')
+            if filepath:
+                print('Found job: '+ filepath)
+                filename = filepath[38:]
+                try:
+                    bucket.download_file(filename, './tmp/'+filename)
+                    print('[UPDATE] Downloading {0} to /tmp'.format(filename))
+                    if os.path.isfile('./tmp/'+filename):
+                        # Let the queue know that the message is processed
+                        message.delete()
+                        print('[UPDATE] Deleting message: {0}'.format(message.body))
+                        return filename
+                except botocore.exceptions.ClientError as e:
+                    print('[ERROR] Botocore exception -- File is not there')
+                    #time.sleep()
+                    #return
             else:
                 print('[ERROR] No file found')
-        else:
-            return
 
 def run_ASR(filename):
     #print ('[UPDATE] Starting ASR on file {0}'.format(filename))
@@ -191,19 +199,21 @@ def run_ASR(filename):
     #check status of ASR_URI
 
 def loop(transcribe, bucket):
+    print ('Set up. Polling for jobs')
     while True:
-        #print ('[UPDATE] Polling for new jobs...')
         filename = get_job(transcribe, bucket)
         if filename:
             run_ASR(filename)
         #if success:
         #    print('[UPDATE] sending response')
         #    queue_response(complete, filename)
+        stdout.write(".")
+        stdout.flush()
 
 def main():
 
     transcribe = connect_queue(queueIn)
-    #complete = connect_queue(queueOut)
+    complete = connect_queue(queueOut)
     bucket = connect_bucket()
     m.start()
     #file_test(transcribe, test1)
@@ -216,6 +226,7 @@ def main():
         m.close_all()
         m.stop()
         m.join()
+        stdout.write("\n")
         sys.exit(0)
 
 if __name__ == "__main__":
