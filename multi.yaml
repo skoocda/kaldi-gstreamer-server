@@ -18,7 +18,7 @@ decoder:
     endpoint-silence-phones : "1:2:3:4:5:6:7:8:9:10"
     traceback-period-in-secs: 0.25
     chunk-length-in-secs: 0.25
-    num-nbest: 10
+    num-nbest: 2
     #Additional functionality that you can play with:
     #lm-fst:  /opt/models/english/tedlium_nnet_ms_sp_online/G.fst
     #big-lm-const-arpa: /opt/models/english/tedlium_nnet_ms_sp_online/G.carpa
