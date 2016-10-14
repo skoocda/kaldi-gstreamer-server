@@ -40,30 +40,51 @@ users = db.users
 statistics = db.statistics
 
 class ASRClient(SQSClient):
+
     def handshake_ok(self):
         manager.add(self)
+        #add the websocketclient to the manager after handshake
 
     def closed(self, code, reason=None):
+        print "[Update] Websocket closed() called"
+        #print >> sys.stderr
         self.final_hyp_queue.put(" ".join(self.final_hyps))
         transcript = self.get_full_hyp()
         if transcript:
+            print ('[UPDATE] Received final transcript:')
+            #print transcript.encode('utf-8')
+            #print('[INFO] Result is in format: ')
+            #print(type(transcript))
             key = self.fn[6:]
             if (update_db(transcript, key)):
+                print('[UPDATE] Successfully updated DB')
                 os.remove(self.fn)
+                print('[UPDATE] Sending response')
                 queue_response(key)
         return
 
 def connect_queue(queueName):
+    # Print out each queue name, which is part of its ARN
+    #for queue in sqs.queues.all():
+    #    print(queue.url)
+
     # Get the queue. This returns an SQS.Queue instance
     queue = sqs.get_queue_by_name(QueueName=queueName)
     if queue:
-        print('Got queue {0}'.format(queue.url))
+        print('[UPDATE] Locked into the queue {0}'.format(queue.url))
+
+    # You can now access identifiers and attributes
+    #print(queue.url)
+    #print(queue.attributes.get('DelaySeconds'))
 
     return queue
 
 def connect_bucket():
+    #for bucket in s3.buckets.all():
+    #    print(bucket)
+
     bucket = s3.Bucket(bucketName)
-    print('Got bucket {0}'.format(bucket.name))
+    print('[UPDATE] Locked into the bucket {0}'.format(bucket.name))
     exists = True
     try:
         s3.meta.client.head_bucket(Bucket=bucketName)
@@ -88,6 +109,8 @@ def queue_response(msgAttribute):
             }
         }
     )
+    #print('[UPDATE] Added response!')
+    #print(response)
     return
 
 def file_test(queue, msgAttribute):
@@ -104,12 +127,29 @@ def file_test(queue, msgAttribute):
     #print(response)
 
 def update_db(transcript, filename):
+
+    #f = open('test.txt', 'r+')
+    #f.write(transcript)
+    #print(transcript)
     transcriptRevised = transcript.replace('}  {', '},  {')
+    #objs = json.loads("[%s]"%(transcriptRevised))
     dbEntry = '{"response": [ ' + transcriptRevised + '] }'
+    #dbEntry = transcriptRevised
+    #for obj in objs:
+    #    dbEntry += obj
+    #dbEntry +='}'
+
+    print('[INFO] Searching for: {0}').format(baseS3 + filename)
+    #print('Updating with: {0}').format(dbEntry)
 
     result = db.transcripts.update_one(
         {"audio.url": baseS3 + filename},
-        {"$set": {"content.full": json.loads(dbEntry)}})
+        {
+            "$set": {
+                "content.full": json.loads(dbEntry)
+            }
+        }
+    )
     if (result.matched_count == 1):
         return True
     else:
@@ -118,15 +158,21 @@ def update_db(transcript, filename):
 
 def get_job(queue, bucket):
     for message in queue.receive_messages(MessageAttributeNames=['file']):
+        #print(message)
+        #print(message.body)
+        #print(message.message_attributes)
         if message.message_attributes is not None:
             filepath = message.message_attributes.get('file').get('StringValue')
             if filepath:
+                print('[UPDATE] Found job: '+ filepath)
                 filename = filepath[38:]
                 try:
+                    print('[UPDATE] Downloading {0} to /tmp'.format(filename))
                     bucket.download_file(filename, './tmp/'+filename)
                     if os.path.isfile('./tmp/'+filename):
                         # Let the queue know that the message is processed
                         message.delete()
+                        print('[UPDATE] Deleting message: {0}'.format(message.body))
                         # All systems are go. Initiate ASR decoding.
                         run_ASR(filename)
 
@@ -136,22 +182,43 @@ def get_job(queue, bucket):
                 print('[ERROR] No file found')
 
 def run_ASR(filename):
+    #print ('[UPDATE] Starting ASR on file {0}'.format(filename))
     filepath = './tmp/'+filename
     ws = ASRClient(filepath, ASR_URI)
+    #print ('[UPDATE] Initiated ASR connection')
     ws.connect()
+    #print ('[UPDATE] Connected to ASR server')
+    #transcript = ws.get_full_hyp()
+    #if transcript:
+    #    print ('[UPDATE] Received final transcript:')
+    #    #print transcript.encode('utf-8')
+    #    if (update_db(transcript, filename)):
+    #        print('[UPDATE] Successfully updated DB')
+    #        os.remove('./tmp/'+filename)
+    #        return True
+
+    #ws.on_close
     return
 
+#def check_availability():
+    #check status of ASR_URI
 
 def loop(transcribe, bucket):
-    print ('[UPDATE] Initialized. Polling for jobs...')
+    print ('[UPDATE] Set up. Polling for jobs:')
     while True:
         get_job(transcribe, bucket)
+        #stdout.write(".")
+        #stdout.flush()
 
 def main():
+
     transcribe = connect_queue(queueIn)
     complete = connect_queue(queueOut)
     bucket = connect_bucket()
     manager.start()
+    #file_test(transcribe, test1)
+    #file_test(transcribe, test2)
+    #file_test(transcribe, test1)
     try:
         loop(transcribe, bucket)
     except KeyboardInterrupt:
