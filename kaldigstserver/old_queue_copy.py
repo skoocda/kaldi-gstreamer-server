@@ -154,7 +154,7 @@ def update_db(transcript, filename):
         return False
         print('[ERROR] No db match found')
 
-def get_job(queue, bucket):
+def get_job(queue):
     for message in queue.receive_messages(MessageAttributeNames=['file']):
         #print(message)
         #print(message.body)
@@ -168,6 +168,7 @@ def get_job(queue, bucket):
                     print('[UPDATE] Downloading to ./tmp/{0}'.format(filename))
                     downloadpath = './tmp/'+filename
                     bucket = connect_bucket()
+		    print('Immediate path entry is: {0}').format(downloadpath)
                     bucket.download_file(filename, downloadpath)
                     count = 0
                     while not os.path.exists(downloadpath) and count < 99:
@@ -198,7 +199,7 @@ def run_ASR(filename):
     #ws.on_close
     return
 
-def loop(transcribe, bucket):
+def loop(transcribe):
     print ('[UPDATE] Set up. Polling for jobs:')
     while True:
         get_job(transcribe)
@@ -212,7 +213,7 @@ def main():
     manager.start()
     #file_test(transcribe, test1)
     try:
-        loop(transcribe, bucket)
+        loop(transcribe)
     except KeyboardInterrupt:
         # We're done. Bail out without dumping a traceback.
         manager.close_all()
