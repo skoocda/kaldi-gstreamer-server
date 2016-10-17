@@ -109,7 +109,7 @@ def queue_response(msgAttribute):
             }
         }
     )
-    #print('[UPDATE] Added response!')
+    print('[UPDATE] Added response!')
     #print(response)
     return
 
@@ -131,14 +131,12 @@ def update_db(transcript, filename):
     #f = open('test.txt', 'r+')
     #f.write(transcript)
     #print(transcript)
+
+    #This is to treat multiple JSON objects as a single response
     transcriptRevised = transcript.replace('}  {', '},  {')
     #objs = json.loads("[%s]"%(transcriptRevised))
     dbEntry = '{"response": [ ' + transcriptRevised + '] }'
     #dbEntry = transcriptRevised
-    #for obj in objs:
-    #    dbEntry += obj
-    #dbEntry +='}'
-
     print('[INFO] Searching for: {0}').format(baseS3 + filename)
     #print('Updating with: {0}').format(dbEntry)
 
@@ -167,14 +165,22 @@ def get_job(queue, bucket):
                 print('[UPDATE] Found job: '+ filepath)
                 filename = filepath[38:]
                 try:
-                    print('[UPDATE] Downloading {0} to /tmp'.format(filename))
-                    bucket.download_file(filename, './tmp/'+filename)
-                    if os.path.isfile('./tmp/'+filename):
+                    print('[UPDATE] Downloading to ./tmp/{0}'.format(filename))
+                    downloadpath = './tmp/'+filename
+                    bucket = connect_bucket()
+                    bucket.download_file(filename, downloadpath)
+                    count = 0
+                    while not os.path.exists(downloadpath) && count < 99:
+                        time.sleep(1)
+                        count += 1
+                    if os.path.isfile(downloadpath):
                         # Let the queue know that the message is processed
                         message.delete()
-                        print('[UPDATE] Deleting message: {0}'.format(message.body))
+                        print('[UPDATE] Deleting message: {0}'.format(filename))
                         # All systems are go. Initiate ASR decoding.
                         run_ASR(filename)
+                    else:
+                        raise ValueError("%s isn't a file!" % downloadpath)
 
                 except botocore.exceptions.ClientError as e:
                     print('[ERROR] Botocore exception -- File is not there')
@@ -182,31 +188,20 @@ def get_job(queue, bucket):
                 print('[ERROR] No file found')
 
 def run_ASR(filename):
-    #print ('[UPDATE] Starting ASR on file {0}'.format(filename))
+    print ('[UPDATE] Starting ASR on file {0}'.format(filename))
     filepath = './tmp/'+filename
     ws = ASRClient(filepath, ASR_URI)
-    #print ('[UPDATE] Initiated ASR connection')
+    print ('[UPDATE] Initiated ASR connection')
     ws.connect()
-    #print ('[UPDATE] Connected to ASR server')
-    #transcript = ws.get_full_hyp()
-    #if transcript:
-    #    print ('[UPDATE] Received final transcript:')
-    #    #print transcript.encode('utf-8')
-    #    if (update_db(transcript, filename)):
-    #        print('[UPDATE] Successfully updated DB')
-    #        os.remove('./tmp/'+filename)
-    #        return True
+    print ('[UPDATE] Connected to ASR server')
 
     #ws.on_close
     return
 
-#def check_availability():
-    #check status of ASR_URI
-
 def loop(transcribe, bucket):
     print ('[UPDATE] Set up. Polling for jobs:')
     while True:
-        get_job(transcribe, bucket)
+        get_job(transcribe)
         #stdout.write(".")
         #stdout.flush()
 
@@ -214,10 +209,7 @@ def main():
 
     transcribe = connect_queue(queueIn)
     complete = connect_queue(queueOut)
-    bucket = connect_bucket()
     manager.start()
-    #file_test(transcribe, test1)
-    #file_test(transcribe, test2)
     #file_test(transcribe, test1)
     try:
         loop(transcribe, bucket)
