@@ -170,7 +170,7 @@ def get_job(queue, bucket):
                     bucket = connect_bucket()
                     bucket.download_file(filename, downloadpath)
                     count = 0
-                    while not os.path.exists(downloadpath) && count < 99:
+                    while not os.path.exists(downloadpath) and count < 99:
                         time.sleep(1)
                         count += 1
                     if os.path.isfile(downloadpath):
