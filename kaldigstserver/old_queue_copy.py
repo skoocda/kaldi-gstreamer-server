@@ -40,7 +40,7 @@ users = db.users
 statistics = db.statistics
 
 #list of files being processed through this manager
-activeFiles = {}
+fileState = {}
 
 
 class ASRClient(SQSClient):
@@ -51,11 +51,33 @@ class ASRClient(SQSClient):
 
     def received_message(self, m):
         response = json.loads(str(m))
-        if response['status'] == 9:
-            mark_error(self.fn[6:])
+        #print >> sys.stderr, "RESPONSE:", response
+        #print >> sys.stderr, "JSON was:", m
+        #print >> sys.stderr, m
+        if response['status'] == 0:
+            if 'result' in response:
+                trans = response['result']['hypotheses'][0]['transcript']
+                if response['result']['final']:
+                    #print >> sys.stderr, trans,
+                    self.final_hyps.append(str(m)+' ')
+                    #print >> sys.stderr, '\r%s' % trans.replace("\n", "\\n")
+                else:
+                    print_trans = trans.replace("\n", "\\n")
+                    if len(print_trans) > 80:
+                        print_trans = "... %s" % print_trans[-76:]
+                    #print >> sys.stderr, '\r%s' % print_trans,
+            if 'adaptation_state' in response:
+                if self.save_adaptation_state_filename:
+                    #print >> sys.stderr, "Saving adaptation state to %s" % self.save_adaptation_state_filename
+                    with open(self.save_adaptation_state_filename, "w") as f:
+                        f.write(json.dumps(response['adaptation_state']))
+        else:
+            print >> sys.stderr, "Received error from server (status %d)" % response['status']
+            if 'message' in response:
+                print >> sys.stderr, "Error message:",  response['message']
 
     def closed(self, code, reason=None):
-        print "[Update] Websocket closed() called"
+        print "[UPDATE] Websocket closed() called"
         #print >> sys.stderr
         self.final_hyp_queue.put(" ".join(self.final_hyps))
         transcript = self.get_full_hyp()
@@ -66,15 +88,15 @@ class ASRClient(SQSClient):
             #print(type(transcript))
             key = self.fn[6:]
             if (update_db(transcript, key)):
-                print('[UPDATE] Successfully updated DB')
-                activeFiles[filename] = 1
+                print('[UPDATE] Successfully updated DB  ')
+                fileState[key] = 1
                 os.remove(self.fn)
                 print('[UPDATE] Sending response')
                 queue_response(key)
             else:
                 print('[ERROR] Could not find DB entry')
-        else:
-            print('[ERROR] Could not get final hypothesis')
+        #else:
+        #    print('[ERROR] Could not get final hypothesis')
         return
 
 def connect_queue(queueName):
@@ -85,7 +107,7 @@ def connect_queue(queueName):
     # Get the queue. This returns an SQS.Queue instance
     queue = sqs.get_queue_by_name(QueueName=queueName)
     if queue:
-        print('[UPDATE] Locked into the queue {0}'.format(queue.url))
+        print('[UPDATE] Locked queue: {0}'.format(queueName))
 
     # You can now access identifiers and attributes
     #print(queue.url)
@@ -151,7 +173,7 @@ def update_db(transcript, filename):
     #objs = json.loads("[%s]"%(transcriptRevised))
     dbEntry = '{"response": [ ' + transcriptRevised + '] }'
     #dbEntry = transcriptRevised
-    print('[INFO] Searching for: {0}').format(baseS3 + filename)
+    #print('[INFO] Searching for: {0}').format(baseS3 + filename)
     #print('Updating with: {0}').format(dbEntry)
 
     result = db.transcripts.update_one(
@@ -183,7 +205,7 @@ def mark_error(filename):
         return False
         print('[ERROR] No db match found')
 
-def get_job(queue):
+def get_job(queue, bucket):
     for message in queue.receive_messages(MessageAttributeNames=['file']):
         #print(message)
         #print(message.body)
@@ -191,19 +213,20 @@ def get_job(queue):
         if message.message_attributes is not None:
             filepath = message.message_attributes.get('file').get('StringValue')
             if filepath:
-                print('[UPDATE] Found job: '+ filepath)
+                print('[UPDATE] Found job: '+ message.body)
                 filename = filepath[38:]
                 try:
                     print('[UPDATE] Downloading to ./tmp/{0}'.format(filename))
                     downloadpath = './tmp/'+filename
-                    bucket = connect_bucket()
                     bucket.download_file(filename, downloadpath)
                     count = 0
                     while not os.path.exists(downloadpath) and count < 99:
                         time.sleep(1)
                         count += 1
+                    if count == 99:
+                        print('[ERROR] Timeout during download')
                     if os.path.isfile(downloadpath):
-                        activeFiles[filename] = 0
+                        fileState[filename] = 0
                         # Let the queue know that the message is processed
                         message.delete()
                         print('[UPDATE] Deleting message: {0}'.format(filename))
@@ -230,23 +253,27 @@ def run_ASR(filename):
     #ws.on_close
     return
 
-def loop(transcribe):
+def loop(transcribe, bucket):
     print ('[UPDATE] Set up. Polling for jobs:')
     while True:
-        get_job(transcribe)
-        #stdout.write(".")
+        get_job(transcribe, bucket)
+        #stdout.write('\r')
+        #for x in fileState:
+        #    stdout.write('{} : {} \n'.format(x, fileState[x]))
         #stdout.flush()
 
 def main():
-
     transcribe = connect_queue(queueIn)
     complete = connect_queue(queueOut)
+    bucket = connect_bucket()
     manager.start()
     #file_test(transcribe, test1)
     try:
-        loop(transcribe)
+        loop(transcribe, bucket)
     except KeyboardInterrupt:
         # We're done. Bail out without dumping a traceback.
+        with open('jobs.json', 'w') as f:
+            f.write(json.dumps(fileState))
         manager.close_all()
         manager.stop()
         manager.join()
