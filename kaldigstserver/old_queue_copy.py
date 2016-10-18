@@ -39,11 +39,20 @@ transcripts = db.transcripts
 users = db.users
 statistics = db.statistics
 
+#list of files being processed through this manager
+activeFiles = {}
+
+
 class ASRClient(SQSClient):
 
     def handshake_ok(self):
         manager.add(self)
         #add the websocketclient to the manager after handshake
+
+    def received_message(self, m):
+        response = json.loads(str(m))
+        if response['status'] == 9:
+            mark_error(self.fn[6:])
 
     def closed(self, code, reason=None):
         print "[Update] Websocket closed() called"
@@ -58,9 +67,14 @@ class ASRClient(SQSClient):
             key = self.fn[6:]
             if (update_db(transcript, key)):
                 print('[UPDATE] Successfully updated DB')
+                activeFiles[filename] = 1
                 os.remove(self.fn)
                 print('[UPDATE] Sending response')
                 queue_response(key)
+            else:
+                print('[ERROR] Could not find DB entry')
+        else:
+            print('[ERROR] Could not get final hypothesis')
         return
 
 def connect_queue(queueName):
@@ -84,7 +98,7 @@ def connect_bucket():
     #    print(bucket)
 
     bucket = s3.Bucket(bucketName)
-    print('[UPDATE] Locked into the bucket {0}'.format(bucket.name))
+    print('[UPDATE] Got bucket {0}'.format(bucket.name))
     exists = True
     try:
         s3.meta.client.head_bucket(Bucket=bucketName)
@@ -154,6 +168,21 @@ def update_db(transcript, filename):
         return False
         print('[ERROR] No db match found')
 
+def mark_error(filename):
+    result = db.transcripts.update_one(
+        {"audio.url": baseS3 + filename},
+        {
+            "$set": {
+                "status": "Error"
+            }
+        }
+    )
+    if (result.matched_count == 1):
+        return True
+    else:
+        return False
+        print('[ERROR] No db match found')
+
 def get_job(queue):
     for message in queue.receive_messages(MessageAttributeNames=['file']):
         #print(message)
@@ -168,13 +197,13 @@ def get_job(queue):
                     print('[UPDATE] Downloading to ./tmp/{0}'.format(filename))
                     downloadpath = './tmp/'+filename
                     bucket = connect_bucket()
-		    print('Immediate path entry is: {0}').format(downloadpath)
                     bucket.download_file(filename, downloadpath)
                     count = 0
                     while not os.path.exists(downloadpath) and count < 99:
                         time.sleep(1)
                         count += 1
                     if os.path.isfile(downloadpath):
+                        activeFiles[filename] = 0
                         # Let the queue know that the message is processed
                         message.delete()
                         print('[UPDATE] Deleting message: {0}'.format(filename))
@@ -185,6 +214,8 @@ def get_job(queue):
 
                 except botocore.exceptions.ClientError as e:
                     print('[ERROR] Botocore exception -- File is not there')
+                    mark_error(filename)
+                    message.delete()
             else:
                 print('[ERROR] No file found')
 
