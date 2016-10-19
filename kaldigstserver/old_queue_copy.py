@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import thread
+import logging
 import json
 import boto3
 import botocore
@@ -11,20 +12,25 @@ import pymongo
 from sys import stdout
 from pymongo import MongoClient
 from sqs_client import SQSClient
+from ws4py.client.threadedclient import WebSocketClient
 from ws4py.manager import WebSocketManager
 
 manager = WebSocketManager()
 timeout = 60
+logging.basicConfig(filename='queue.log', filemode='w', level=logging.INFO)
 
-# Get the service resources
+############################### Get the service resources
 sqs = boto3.resource('sqs')
 s3 = boto3.resource('s3')
 
 bucketName = 'spreza-audio'
 queueIn = 'transcribe'
 queueOut = 'complete'
-ASR_URI = 'ws://54.221.51.233/client/ws/speech'
-baseS3 = 'https://spreza-audio.s3.amazonaws.com/'
+#URI = '54.205.82.96'
+URI = '54.221.51.233'
+ASR_URI = 'ws://' + URI + '/client/ws/speech'
+STATUS_URI = 'ws://' + URI + '/client/ws/status'
+baseS3 = 'https://' + bucketName + '.s3.amazonaws.com/'
 
 #english_test
 test1 = 'mogdwzcmijaxapi1471346675086.wav'
@@ -33,18 +39,50 @@ test2 = 'btvetyxznumvnsq1473104501017.mp3'
 
 #client = MongoClient('mongodb://spreza:spreza@ds049106-a0.mlab.com:49106,ds049106-a1.mlab.com:49106/spreza?replicaSet=rs-ds049106')
 #db = client.spreza
+
 client = MongoClient('mongodb://spreza:spreza@ds027215.mlab.com:27215/audio')
 db = client.audio
 transcripts = db.transcripts
 users = db.users
 statistics = db.statistics
 
-#list of files being processed through this manager
-fileState = {}
+########## global vars for tracking state
+inProgress = {}
+WORKER_COUNT = 0
+REQUEST_COUNT = 0
 
+class StatusClient(WebSocketClient):
+    def __init__(self, url, protocols=None, extensions=None, heartbeat_freq=None,
+                 ssl_options=None, headers=None):
+        super(StatusClient, self).__init__(url, protocols, extensions, heartbeat_freq, ssl_options, headers)
+        self.workers = 0
+        self.requests = 0
+
+    def handshake_ok(self):
+        logging.info("[STATUS] Added status monitor to manager")
+        manager.add(self)
+
+    def opened(self):
+        logging.info("[STATUS] Opened status monitor connection")
+
+    def received_message(self, m):
+        logging.info("[STATUS] %d => %s" % (len(m), str(m)))
+        status = json.loads(str(m))
+        self.workers = status['num_workers_available']
+        self.requests = status['num_requests_processed']
+        logging.info('[STATUS] Workers available: {}'.format(self.workers))
+        #self.close()
+
+    def closed(self, code, reason=None):
+        logging.info(("[STATUS] Closed down", code, reason))
+
+    def get_workers(self):
+        return self.workers
+
+    def get_requests(self):
+        return self.requests
 
 class ASRClient(SQSClient):
-
     def handshake_ok(self):
         manager.add(self)
         #add the websocketclient to the manager after handshake
@@ -53,7 +91,7 @@ class ASRClient(SQSClient):
         response = json.loads(str(m))
         #print >> sys.stderr, "RESPONSE:", response
         #print >> sys.stderr, "JSON was:", m
-        #print >> sys.stderr, m
+        logging.info(m)
         if response['status'] == 0:
             if 'result' in response:
                 trans = response['result']['hypotheses'][0]['transcript']
@@ -72,29 +110,29 @@ class ASRClient(SQSClient):
                     with open(self.save_adaptation_state_filename, "w") as f:
                         f.write(json.dumps(response['adaptation_state']))
         else:
-            print >> sys.stderr, "Received error from server (status %d)" % response['status']
+            logging.warning( "Received error from server (status {})".format(response['status']))
             if 'message' in response:
-                print >> sys.stderr, "Error message:",  response['message']
+                logging.info( "Error message: {}".format(response['message']))
 
     def closed(self, code, reason=None):
-        print "[UPDATE] Websocket closed() called"
+        logging.info ("[UPDATE] Websocket closed() called")
         #print >> sys.stderr
         self.final_hyp_queue.put(" ".join(self.final_hyps))
         transcript = self.get_full_hyp()
         if transcript:
-            print ('[UPDATE] Received final transcript:')
-            #print transcript.encode('utf-8')
-            #print('[INFO] Result is in format: ')
-            #print(type(transcript))
+            logging.info ('[UPDATE] Received final transcript:')
+            logging.info (transcript.encode('utf-8'))
+            logging.info('[INFO] Result is in format: ')
+            logging.info(type(transcript))
             key = self.fn[6:]
             if (update_db(transcript, key)):
-                print('[UPDATE] Successfully updated DB  ')
-                fileState[key] = 1
+                logging.info('[UPDATE] Successfully updated DB  ')
+                inProgress[key] = 'DB'
                 os.remove(self.fn)
-                print('[UPDATE] Sending response')
+                logging.info('[UPDATE] Sending response')
                 queue_response(key)
             else:
-                print('[ERROR] Could not find DB entry')
+                logging.warning('[ERROR] Could not find DB entry')
         #else:
         #    print('[ERROR] Could not get final hypothesis')
         return
@@ -107,12 +145,7 @@ def connect_queue(queueName):
     # Get the queue. This returns an SQS.Queue instance
     queue = sqs.get_queue_by_name(QueueName=queueName)
     if queue:
-        print('[UPDATE] Locked queue: {0}'.format(queueName))
-
-    # You can now access identifiers and attributes
-    #print(queue.url)
-    #print(queue.attributes.get('DelaySeconds'))
-
+        logging.info('[UPDATE] Locked queue: {0}'.format(queueName))
     return queue
 
 def connect_bucket():
@@ -120,7 +153,7 @@ def connect_bucket():
     #    print(bucket)
 
     bucket = s3.Bucket(bucketName)
-    print('[UPDATE] Got bucket {0}'.format(bucket.name))
+    logging.info('[UPDATE] Got bucket {0}'.format(bucket.name))
     exists = True
     try:
         s3.meta.client.head_bucket(Bucket=bucketName)
@@ -145,8 +178,8 @@ def queue_response(msgAttribute):
             }
         }
     )
-    print('[UPDATE] Added response!')
-    #print(response)
+    logging.info('[UPDATE] Added response!')
+    inProgress.pop(msgAttribute, None)
     return
 
 def file_test(queue, msgAttribute):
@@ -159,22 +192,15 @@ def file_test(queue, msgAttribute):
             }
         }
     )
-    print('[UPDATE] Added test message!')
-    #print(response)
+    logging.info('[UPDATE] Added test message!')
+    logging.info(response)
 
 def update_db(transcript, filename):
-
-    #f = open('test.txt', 'r+')
-    #f.write(transcript)
-    #print(transcript)
-
     #This is to treat multiple JSON objects as a single response
     transcriptRevised = transcript.replace('}  {', '},  {')
-    #objs = json.loads("[%s]"%(transcriptRevised))
     dbEntry = '{"response": [ ' + transcriptRevised + '] }'
-    #dbEntry = transcriptRevised
-    #print('[INFO] Searching for: {0}').format(baseS3 + filename)
-    #print('Updating with: {0}').format(dbEntry)
+    logging.info('[INFO] Searching for file and updating DB:')
+    logging.info(dbEntry)
 
     result = db.transcripts.update_one(
         {"audio.url": baseS3 + filename},
@@ -188,7 +214,7 @@ def update_db(transcript, filename):
         return True
     else:
         return False
-        print('[ERROR] No db match found')
+        logging.warning('[ERROR] No db match found')
 
 def mark_error(filename):
     result = db.transcripts.update_one(
@@ -203,20 +229,21 @@ def mark_error(filename):
         return True
     else:
         return False
-        print('[ERROR] No db match found')
+        logging.warning('[ERROR] No db match found')
 
 def get_job(queue, bucket):
+    logging.info('[UPDATE] Getting new jobs...')
     for message in queue.receive_messages(MessageAttributeNames=['file']):
-        #print(message)
-        #print(message.body)
-        #print(message.message_attributes)
+        logging.info(message)
+        logging.info(message.body)
+        logging.info(message.message_attributes)
         if message.message_attributes is not None:
             filepath = message.message_attributes.get('file').get('StringValue')
             if filepath:
-                print('[UPDATE] Found job: '+ message.body)
+                logging.info('[UPDATE] Found job: '+ message.body)
                 filename = filepath[38:]
                 try:
-                    print('[UPDATE] Downloading to ./tmp/{0}'.format(filename))
+                    logging.info('[UPDATE] Downloading to ./tmp/{0}'.format(filename))
                     downloadpath = './tmp/'+filename
                     bucket.download_file(filename, downloadpath)
                     count = 0
@@ -224,56 +251,64 @@ def get_job(queue, bucket):
                         time.sleep(1)
                         count += 1
                     if count == 99:
-                        print('[ERROR] Timeout during download')
+                        logging.error('[ERROR] Timeout during download')
                     if os.path.isfile(downloadpath):
-                        fileState[filename] = 0
+                        inProgress[filename] = 'start'
                         # Let the queue know that the message is processed
                         message.delete()
-                        print('[UPDATE] Deleting message: {0}'.format(filename))
+                        logging.info('[UPDATE] Deleting message: {0}'.format(filename))
                         # All systems are go. Initiate ASR decoding.
                         run_ASR(filename)
                     else:
                         raise ValueError("%s isn't a file!" % downloadpath)
 
                 except botocore.exceptions.ClientError as e:
-                    print('[ERROR] Botocore exception -- File is not there')
+                    logging.error('[ERROR] Botocore exception -- File is not there')
                     mark_error(filename)
                     message.delete()
             else:
-                print('[ERROR] No file found')
+                logging.warning('[ERROR] No file found')
 
 def run_ASR(filename):
-    print ('[UPDATE] Starting ASR on file {0}'.format(filename))
+    logging.info('[UPDATE] Starting ASR on file {0}'.format(filename))
     filepath = './tmp/'+filename
     ws = ASRClient(filepath, ASR_URI)
-    print ('[UPDATE] Initiated ASR connection')
+    logging.info('[UPDATE] Initiated ASR connection')
     ws.connect()
-    print ('[UPDATE] Connected to ASR server')
+    logging.info('[UPDATE] Connected to ASR server')
+    inProgress[filename] = 'transcribe'
 
-    #ws.on_close
-    return
 
-def loop(transcribe, bucket):
-    print ('[UPDATE] Set up. Polling for jobs:')
+def loop(transcribe, bucket, sm):
+    logging.info('[UPDATE] Set up.')
+    worker_count = 0
     while True:
-        get_job(transcribe, bucket)
-        #stdout.write('\r')
-        #for x in fileState:
-        #    stdout.write('{} : {} \n'.format(x, fileState[x]))
-        #stdout.flush()
+        worker_count = sm.get_workers()
+        stdout.write('-POLLING- {} workers available. \r'.format(worker_count))
+        stdout.flush()
+        if worker_count > 0:
+            worker_count -= 1
+            get_job(transcribe, bucket)
+        #sm.close()
+            #for x in inProgress:
+            #    stdout.write('{} : {} \n'.format(x, inProgress[x]))
 
 def main():
+    manager.start()
+    logging.info('[UPDATE] Started manager')
     transcribe = connect_queue(queueIn)
     complete = connect_queue(queueOut)
     bucket = connect_bucket()
-    manager.start()
+    sm = StatusClient(STATUS_URI)
+    sm.connect()
+    #time.sleep(10)
     #file_test(transcribe, test1)
     try:
-        loop(transcribe, bucket)
+        loop(transcribe, bucket, sm)
     except KeyboardInterrupt:
         # We're done. Bail out without dumping a traceback.
-        with open('jobs.json', 'w') as f:
-            f.write(json.dumps(fileState))
+        with open('progress.log', 'w') as f:
+            f.write(json.dumps(inProgress))
         manager.close_all()
         manager.stop()
         manager.join()
