@@ -44,7 +44,7 @@ class SQSClient(WebSocketClient):
         self.send(data, binary=True)
 
     def opened(self):
-        print "[CLIENT] Socket open"
+        #print "[CLIENT] Queueueue Socket open"
         def send_data_to_ws():
             f = open(self.fn, "rb")
             if self.send_adaptation_state_filename is not None:
